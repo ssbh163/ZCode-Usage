@@ -366,39 +366,35 @@ async function main() {
   const fmt = (d) => `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}`;
   const qs = (start, end) => `?startTime=${encodeURIComponent(fmt(start))}&endTime=${encodeURIComponent(fmt(end))}`;
   const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-  // 当日高峰时段与 [当天零点, 现在] 的交集;周末或未到 14 点为 null(此时高峰用量恒为 0)
-  const peakWindow = (() => {
-    const dow = now.getDay();
-    if (dow === 0 || dow === 6) return null;
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 14, 0, 0);
-    if (now.getTime() <= start.getTime()) return null;
-    return { start, end: new Date(Math.min(now.getTime(), start.getTime() + 4 * 3600 * 1000)) };
-  })();
-  const [modelUsage, toolUsage, peakUsage] = await Promise.all([
+  const [modelUsage, toolUsage] = await Promise.all([
     get('/api/monitor/usage/model-usage' + qs(dayStart, now)).catch(() => null),
     get('/api/monitor/usage/tool-usage' + qs(dayStart, now)).catch(() => null),
-    peakWindow
-      ? get('/api/monitor/usage/model-usage' + qs(peakWindow.start, peakWindow.end)).catch(() => null)
-      : null,
   ]);
-  // 高峰/非高峰拆分:非高峰 = 当日总量 - 高峰;高峰窗口存在但查询失败时不拆分(只显示当日总量)
+  // 高峰/非高峰拆分:直接对当日查询自带的小时序列(x_time / modelCallCount / tokensUsage)
+  // 求和——工作日取 14:00–17:59 的小时桶(左闭右开,18 点桶属非高峰)。
+  // 不再单独发峰窗区间请求:官方接口对当天的区间查询会把 endTime 截到当前时刻
+  // (晚间查询会把全天算进高峰),且区间 endTime 桶为包含语义(会把 18–19 点多算)。
+  // 序列标签是服务端北京时间字符串,按字符串切片解析,与本机时区无关;序列缺失时不拆分。
   let usageSplit = null;
   const total = modelUsage?.totalUsage;
-  if (total) {
-    const peakT = peakWindow === null
-      ? { totalModelCallCount: 0, totalTokensUsage: 0 }
-      : peakUsage?.totalUsage;
-    if (peakT) {
-      const pc = Number(peakT.totalModelCallCount) || 0;
-      const pt = Number(peakT.totalTokensUsage) || 0;
-      usageSplit = {
-        peak: { calls: pc, tokens: pt },
-        offPeak: {
-          calls: Math.max(0, (Number(total.totalModelCallCount) || 0) - pc),
-          tokens: Math.max(0, (Number(total.totalTokensUsage) || 0) - pt),
-        },
-      };
-    }
+  if (total && Array.isArray(modelUsage.x_time)) {
+    const dow = now.getDay();
+    const workday = dow >= 1 && dow <= 5;
+    let pc = 0, pt = 0;
+    modelUsage.x_time.forEach((label, i) => {
+      const hour = Number(String(label).slice(11, 13));
+      if (workday && hour >= 14 && hour <= 17) {
+        pc += Number(modelUsage.modelCallCount?.[i]) || 0;
+        pt += Number(modelUsage.tokensUsage?.[i]) || 0;
+      }
+    });
+    usageSplit = {
+      peak: { calls: pc, tokens: pt },
+      offPeak: {
+        calls: Math.max(0, (Number(total.totalModelCallCount) || 0) - pc),
+        tokens: Math.max(0, (Number(total.totalTokensUsage) || 0) - pt),
+      },
+    };
   }
 
   if (asJson) {
