@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const argv = process.argv.slice(2);
 const asJson = argv.includes('--json');
@@ -219,17 +219,22 @@ function fromZcodeConfig() {
   return null;
 }
 
-const cred = fromArgs() || fromEnv() || fromManualFile() || fromZcodeConfig();
-if (!cred) {
-  console.error('未找到 Coding Plan API Key。请任选其一:');
-  console.error('  1. 在 ZCode 中配置 Coding Plan API Key(~/.zcode/v2/config.json)');
-  console.error('  2. 悬浮窗里点「🔑 配置 API Key」填写(推荐,保存到 ~/.zcode/zcode-usage-manual.json,CLI 查询同样生效)');
-  console.error('  3. 设置环境变量 ANTHROPIC_AUTH_TOKEN 和 ANTHROPIC_BASE_URL');
-  console.error('  4. 运行时传参: --key <apiKey> --base https://open.bigmodel.cn/api/anthropic');
-  process.exit(1);
+// 凭据惰性解析(main 入口才执行):被 zcode-usage.test.mjs import 时不触发查找与退出
+let cred = null;
+let origin = null;
+function ensureCred() {
+  if (cred) return;
+  cred = fromArgs() || fromEnv() || fromManualFile() || fromZcodeConfig();
+  if (!cred) {
+    console.error('未找到 Coding Plan API Key。请任选其一:');
+    console.error('  1. 在 ZCode 中配置 Coding Plan API Key(~/.zcode/v2/config.json)');
+    console.error('  2. 悬浮窗里点「🔑 配置 API Key」填写(推荐,保存到 ~/.zcode/zcode-usage-manual.json,CLI 查询同样生效)');
+    console.error('  3. 设置环境变量 ANTHROPIC_AUTH_TOKEN 和 ANTHROPIC_BASE_URL');
+    console.error('  4. 运行时传参: --key <apiKey> --base https://open.bigmodel.cn/api/anthropic');
+    process.exit(1);
+  }
+  origin = new URL(cred.base).origin;
 }
-
-const origin = new URL(cred.base).origin;
 
 // ---------- 请求 ----------
 // 常规查询 10s、hook 模式 5s,防止网络悬挂时阻塞悬浮窗 UI 或会话启动
@@ -262,6 +267,55 @@ async function get(p) {
     throw new Error(`${p} -> ${body.msg || body.code}`);
   }
   return body.data ?? body;
+}
+
+// ---------- 北京时间纯函数(export 供 zcode-usage.test.mjs 单测) ----------
+// 智谱服务端按北京时间(UTC+8)记账并定义峰时;全部用 +08:00 显式折算,与本机时区无关
+// (借鉴 zcode-watch 的做法——本机恰好 UTC+8 时结果与旧实现一致,海外/出差机器不会错位)。
+const BJ_OFFSET_MS = 8 * 3600_000;
+const z2 = (n) => String(n).padStart(2, '0');
+
+/** epoch(ms) → 北京时间字符串 'YYYY-MM-DD HH:mm:ss'(纯 UTC 运算,不吃本机时区) */
+export function bjFmt(ms) {
+  const d = new Date(ms + BJ_OFFSET_MS);
+  return `${d.getUTCFullYear()}-${z2(d.getUTCMonth() + 1)}-${z2(d.getUTCDate())}`
+    + ` ${z2(d.getUTCHours())}:${z2(d.getUTCMinutes())}:${z2(d.getUTCSeconds())}`;
+}
+
+/** epoch(ms) → 所在北京日的 00:00:00(epoch);当日查询窗口的起点 */
+export function bjDayStartMs(ms) {
+  const d = new Date(ms + BJ_OFFSET_MS);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - BJ_OFFSET_MS;
+}
+
+/** 'YYYY-MM-DD' → 星期(0=周日),走 Date.UTC 不吃本机时区;畸形返回 -1 */
+export function weekdayOfDateStr(dateStr) {
+  const [y, m, d] = String(dateStr).split('-').map(Number);
+  if (!y || !m || !d) return -1;
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+}
+
+/** 小时桶标签(服务端北京时间 'YYYY-MM-DD HH:00')是否落在高峰:工作日 14–17 点。
+ *  星期取自标签自身的日期,而非当前时刻——跨零点/周末边界自洽;畸形标签返回 false */
+export function isPeakHourLabel(label) {
+  const s = String(label || '');
+  const dow = weekdayOfDateStr(s.slice(0, 10));
+  if (dow < 1 || dow > 5) return false;
+  const hour = Number(s.slice(11, 13));
+  return hour >= 14 && hour <= 17;
+}
+
+/** model-usage 当日响应 → 高峰用量 { calls, tokens }(逐小时桶按标签归类) */
+export function peakOf(modelUsage) {
+  let calls = 0;
+  let tokens = 0;
+  const xTime = modelUsage?.x_time || [];
+  for (let i = 0; i < xTime.length; i++) {
+    if (!isPeakHourLabel(xTime[i])) continue;
+    calls += Number(modelUsage.modelCallCount?.[i]) || 0;
+    tokens += Number(modelUsage.tokensUsage?.[i]) || 0;
+  }
+  return { calls, tokens };
 }
 
 // ---------- 颜色与排版 ----------
@@ -341,6 +395,7 @@ const rule = (ch) => c('2;36', ch.repeat(50));
 
 // ---------- 主流程 ----------
 async function main() {
+  ensureCred();
   const quota = await get('/api/monitor/usage/quota/limit');
 
   // SessionStart hook 模式:只查额度,输出 additionalContext JSON,注入会话上下文
@@ -360,34 +415,23 @@ async function main() {
     return;
   }
 
-  // 当日用量(失败不影响额度展示);高峰期 = 工作日(周一至周五)14:00–18:00
+  // 当日用量(失败不影响额度展示);高峰期 = 工作日(周一至周五)北京时间 14:00–18:00
   const now = new Date();
-  const z = (n) => String(n).padStart(2, '0');
-  const fmt = (d) => `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}`;
-  const qs = (start, end) => `?startTime=${encodeURIComponent(fmt(start))}&endTime=${encodeURIComponent(fmt(end))}`;
-  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+  const nowMs = now.getTime();
+  const qs = (startMs, endMs) => `?startTime=${encodeURIComponent(bjFmt(startMs))}&endTime=${encodeURIComponent(bjFmt(endMs))}`;
+  const dayStartMs = bjDayStartMs(nowMs);
   const [modelUsage, toolUsage] = await Promise.all([
-    get('/api/monitor/usage/model-usage' + qs(dayStart, now)).catch(() => null),
-    get('/api/monitor/usage/tool-usage' + qs(dayStart, now)).catch(() => null),
+    get('/api/monitor/usage/model-usage' + qs(dayStartMs, nowMs)).catch(() => null),
+    get('/api/monitor/usage/tool-usage' + qs(dayStartMs, nowMs)).catch(() => null),
   ]);
-  // 高峰/非高峰拆分:直接对当日查询自带的小时序列(x_time / modelCallCount / tokensUsage)
-  // 求和——工作日取 14:00–17:59 的小时桶(左闭右开,18 点桶属非高峰)。
+  // 高峰/非高峰拆分:非高峰 = 当日总量 - 高峰;高峰 = peakOf 对当日响应的小时序列求和。
   // 不再单独发峰窗区间请求:官方接口对当天的区间查询会把 endTime 截到当前时刻
   // (晚间查询会把全天算进高峰),且区间 endTime 桶为包含语义(会把 18–19 点多算)。
-  // 序列标签是服务端北京时间字符串,按字符串切片解析,与本机时区无关;序列缺失时不拆分。
+  // 窗口与峰时全部锚定北京时间(见纯函数段);序列缺失时不拆分(只显示当日总量)。
   let usageSplit = null;
   const total = modelUsage?.totalUsage;
   if (total && Array.isArray(modelUsage.x_time)) {
-    const dow = now.getDay();
-    const workday = dow >= 1 && dow <= 5;
-    let pc = 0, pt = 0;
-    modelUsage.x_time.forEach((label, i) => {
-      const hour = Number(String(label).slice(11, 13));
-      if (workday && hour >= 14 && hour <= 17) {
-        pc += Number(modelUsage.modelCallCount?.[i]) || 0;
-        pt += Number(modelUsage.tokensUsage?.[i]) || 0;
-      }
-    });
+    const { calls: pc, tokens: pt } = peakOf(modelUsage);
     usageSplit = {
       peak: { calls: pc, tokens: pt },
       offPeak: {
@@ -460,11 +504,16 @@ async function main() {
   console.log(dim(`    凭据来源 ${cred.from} · 加 --json 看原始数据`));
 }
 
-main().catch((e) => {
-  console.error('查询失败:', e.message);
-  if (String(e.message).includes('HTTP 401')) {
-    console.error('该 API Key 可能:1) 已失效或被更换;2) 不是 Coding Plan 专用 Key(普通按量付费 Key 无法查询套餐额度)。');
-    console.error('请在 ZCode 的模型设置中检查 Key,或在悬浮窗「🔑 配置 API Key」里更新,或到智谱开放平台「个人编程套餐」重新获取。');
-  }
-  process.exit(1);
-});
+// 仅作为可执行入口时运行(main 之外无副作用),供 zcode-usage.test.mjs 安全 import
+const isMain = process.argv[1]
+  && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+if (isMain) {
+  main().catch((e) => {
+    console.error('查询失败:', e.message);
+    if (String(e.message).includes('HTTP 401')) {
+      console.error('该 API Key 可能:1) 已失效或被更换;2) 不是 Coding Plan 专用 Key(普通按量付费 Key 无法查询套餐额度)。');
+      console.error('请在 ZCode 的模型设置中检查 Key,或在悬浮窗「🔑 配置 API Key」里更新,或到智谱开放平台「个人编程套餐」重新获取。');
+    }
+    process.exit(1);
+  });
+}

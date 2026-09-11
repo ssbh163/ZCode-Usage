@@ -1,4 +1,4 @@
-# ZCode Usage — 0.0.6
+# ZCode Usage — 0.0.7
 
 支持API KEY与账号登录两种方式查询 GLM Coding Plan 额度(当日高峰/非高峰拆分),悬浮窗展示:
 
