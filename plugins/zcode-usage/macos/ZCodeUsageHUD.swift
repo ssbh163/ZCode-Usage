@@ -1,13 +1,14 @@
 // ============================================================================
-// 文件作用：GLM Coding Plan 用量悬浮窗（macOS 原生实现）
+// 文件作用：GLM Coding Plan 用量查看器（macOS 原生实现 · 菜单栏弹窗版）
 //
-// 当前版本：v1.1
-//   - 无边框圆角悬浮面板，始终置顶，可用鼠标任意位置拖拽
+// 当前版本：v2.0
+//   - 常驻菜单栏 ⚡ 图标，左键点击弹出系统原生 NSPopover 面板
+//   - 弹窗为 transient 行为：点击面板外任意位置自动收起，无需关闭按钮
+//   - 圆角、描边、阴影、深浅色全部由系统弹窗负责，不再自绘外框
+//     （v1.x 用 NSVisualEffectView 自绘圆角 + 内容高度不同步导致边缘裁切，已根治）
+//   - 右键图标：配置 API Key / 打开配置文件夹 / 退出
 //   - 全局快捷键（默认 Ctrl+G）随时唤出 / 收起
-//   - 菜单栏图标兜底，快捷键失效时也能操作
-//   - 窗口位置自动记忆，下次弹出保持在上次拖到的地方
-//   - v1.1 查询失败时可在面板内直接配置 API Key（服务商下拉 + 粘贴 Key），
-//     免去手工编辑 config.json 的门槛；菜单栏也常驻「配置 API Key…」入口
+//   - v1.1 查询失败时可在面板内直接配置 API Key（服务商下拉 + 粘贴 Key）
 //   - v1.2 手动凭据改存 ~/.zcode/zcode-usage-manual.json，与 Windows 悬浮窗及
 //     CLI 查询共用同一份；config.json 里的手填字段仍兼容，但优先级低于共享文件
 //
@@ -41,10 +42,9 @@ enum HUDPaths {
 }
 
 enum HUDMetrics {
+    /// 弹窗内容宽度（圆角、描边由 NSPopover 自带，无需自绘）
     static let width: CGFloat = 372
-    static let height: CGFloat = 306
     static let pad: CGFloat = 18
-    static let corner: CGFloat = 16
 }
 
 // MARK: - 配置读写
@@ -490,7 +490,6 @@ final class HUDContentView: NSView {
     let titleLabel = makeLabel(14, .bold, .labelColor)
     let metaLabel = makeLabel(10.5, .regular, .tertiaryLabelColor)
     let refreshButton = NSButton()
-    let closeButton = NSButton()
     var rows: [QuotaRowView] = []
     let separator = NSBox()
     // 高峰期横幅(工作日 14:00–18:00 常驻,结束自动收起):橙色倒计时 + 时段进度条
@@ -518,7 +517,6 @@ final class HUDContentView: NSView {
         metaLabel.stringValue = "正在读取…"
 
         configureIconButton(refreshButton, title: "↻", tooltip: "立即刷新")
-        configureIconButton(closeButton, title: "✕", tooltip: "收起面板")
 
         configKeyButton.title = "🔑 配置 API Key"
         configKeyButton.bezelStyle = .rounded
@@ -542,7 +540,7 @@ final class HUDContentView: NSView {
             addSubview(r)
         }
         setupView.isHidden = true
-        [titleLabel, metaLabel, refreshButton, closeButton,
+        [titleLabel, metaLabel, refreshButton,
          separator, peakBannerLabel, peakBannerValue, peakBannerBar,
          footerLabel, peakLabel, peakValue, offPeakLabel, offPeakValue,
          footerSubLabel, hintLabel, configKeyButton, setupView].forEach { addSubview($0) }
@@ -565,9 +563,8 @@ final class HUDContentView: NSView {
         let w = bounds.width - pad * 2
         var y = pad - 2
 
-        titleLabel.frame = NSRect(x: pad, y: y, width: w - 60, height: 20)
-        closeButton.frame = NSRect(x: bounds.width - pad - 20, y: y, width: 20, height: 20)
-        refreshButton.frame = NSRect(x: bounds.width - pad - 46, y: y, width: 20, height: 20)
+        titleLabel.frame = NSRect(x: pad, y: y, width: w - 32, height: 20)
+        refreshButton.frame = NSRect(x: bounds.width - pad - 20, y: y, width: 20, height: 20)
         y += 21
         metaLabel.frame = NSRect(x: pad, y: y, width: w, height: 14)
         y += 14 + 12
@@ -587,7 +584,9 @@ final class HUDContentView: NSView {
             y += 4 + 8
         }
 
-        for r in rows {
+        // 只为可见行分配位置：隐藏行若仍推进 y，会把下方内容整体压出面板底部
+        // （外框裁切问题的根因——布局按 3 行预留，高度按可见行数计算）
+        for r in rows where !r.isHidden {
             r.frame = NSRect(x: pad, y: y, width: w, height: QuotaRowView.rowHeight)
             r.needsLayout = true
             y += QuotaRowView.rowHeight + 8
@@ -705,7 +704,7 @@ final class HUDContentView: NSView {
         separator.isHidden = false
         configKeyButton.isHidden = true
         hintLabel.isHidden = false
-        hintLabel.stringValue = "\(hotkeyText) 唤出 / 收起 · 拖拽面板可移动位置"
+        hintLabel.stringValue = "\(hotkeyText) 唤出 / 收起 · 点击面板外任意位置关闭"
         needsLayout = true
     }
 
@@ -725,7 +724,7 @@ final class HUDContentView: NSView {
         separator.isHidden = false
         configKeyButton.isHidden = false
         hintLabel.isHidden = false
-        hintLabel.stringValue = "\(hotkeyText) 唤出 / 收起 · 拖拽面板可移动位置"
+        hintLabel.stringValue = "\(hotkeyText) 唤出 / 收起 · 点击面板外任意位置关闭"
         needsLayout = true
     }
 
@@ -800,7 +799,7 @@ final class CredentialSetupView: NSView {
         keyLabel.stringValue = "API Key"
         keyField.placeholderString = "在此粘贴 API Key"
         keyField.font = .systemFont(ofSize: 12)
-        keyField.setFocusRingType(.exterior)
+        keyField.focusRingType = .exterior
 
         saveButton.title = "保存并查询"
         saveButton.bezelStyle = .rounded
@@ -853,7 +852,7 @@ final class CredentialSetupView: NSView {
     @objc private func saveAction() {
         let key = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else {
-            NSApp.beep()
+            NSSound.beep()
             hintLabel.stringValue = "请先粘贴 API Key 再保存"
             return
         }
@@ -863,14 +862,6 @@ final class CredentialSetupView: NSView {
     @objc private func clearAction() {
         onClear?()
     }
-}
-
-// MARK: - 悬浮面板
-
-final class HUDPanel: NSPanel {
-    // 无边框窗口默认不能成为 key window，这里放开以便响应 Esc / 输入框获得焦点
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
 }
 
 // MARK: - 全局快捷键（Carbon，不需要辅助功能授权）
@@ -953,9 +944,9 @@ final class HotKeyCenter {
 
 // MARK: - 应用主体
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
-    private var panel: HUDPanel!
+    private var popover: NSPopover!
     private var content: HUDContentView!
     private var statusItem: NSStatusItem!
     private var refreshTimer: Timer?
@@ -963,21 +954,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var config = HUDConfig.load()
     private var lastData: UsageRootDTO?
     private var hotkeyOK = false
+    /// 弹窗刚被系统收起（如用户点击了菜单栏图标）的时刻：
+    /// transient 弹窗在用户再次点击图标时会先自动关闭再触发按钮 action，
+    /// 记下时间戳避免「关闭后 action 又立即弹开」的抖动
+    private var lastAutoClose: Date?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        buildPanel()
+        buildPopover()
         buildStatusItem()
         setupHotKey()
 
-        if config.autoShowOnStart { showPanel() }
+        // 菜单栏弹窗交互下，启动只挂图标不弹窗；数据后台先取一份，
+        // 弹窗每次打开时都会重新拉取最新值
         refresh()
         startTimers()
     }
 
-    /// 再次 open 本应用时（ZCode 每次启动会调一次），把面板重新弹出来
+    /// ZCode 每次会话启动会 open 一次本应用：后台刷新一份数据即可，不弹窗打扰
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        showPanel()
         refresh()
         return true
     }
@@ -988,79 +983,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: 界面搭建
 
-    private func buildPanel() {
-        let rect = NSRect(x: 0, y: 0, width: HUDMetrics.width, height: HUDMetrics.height)
-        panel = HUDPanel(contentRect: rect,
-                         styleMask: [.borderless, .nonactivatingPanel],
-                         backing: .buffered,
-                         defer: false)
-        panel.isFloatingPanel = true
-        panel.level = .floating
-        panel.hidesOnDeactivate = false
-        panel.isMovableByWindowBackground = true   // 面板任意位置都能拖拽
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
-        panel.hasShadow = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        panel.delegate = self
-
-        let effect = NSVisualEffectView(frame: rect)
-        effect.material = .hudWindow
-        effect.blendingMode = .behindWindow
-        effect.state = .active
-        effect.wantsLayer = true
-        effect.layer?.cornerRadius = HUDMetrics.corner
-        effect.layer?.masksToBounds = true
-        effect.layer?.borderWidth = 1
-        effect.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
-        effect.autoresizingMask = [.width, .height]
-
-        content = HUDContentView(frame: rect)
-        content.autoresizingMask = [.width, .height]
+    private func buildPopover() {
+        content = HUDContentView(frame: NSRect(x: 0, y: 0, width: HUDMetrics.width, height: 306))
         content.refreshButton.target = self
         content.refreshButton.action = #selector(refreshAction)
-        content.closeButton.target = self
-        content.closeButton.action = #selector(hidePanel)
         content.configKeyButton.target = self
         content.configKeyButton.action = #selector(openCredentialSetup)
         content.setupView.onSave = { [weak self] key, base in
             self?.saveCredential(key: key, base: base)
         }
         content.setupView.onClear = { [weak self] in self?.clearCredential() }
-        effect.addSubview(content)
 
-        panel.contentView = effect
-        restoreFrame()
+        let vc = NSViewController()
+        vc.view = content
+        popover = NSPopover()
+        popover.contentViewController = vc
+        popover.behavior = .transient   // 点击面板外任意位置自动收起
+        popover.delegate = self
+        popover.contentSize = NSSize(width: HUDMetrics.width, height: 306)
     }
 
     private func buildStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "⚡"
-        statusItem.button?.toolTip = "GLM Coding Plan 用量"
-
-        let menu = NSMenu()
-        let toggle = NSMenuItem(title: "显示 / 收起面板", action: #selector(togglePanel), keyEquivalent: "")
-        toggle.target = self
-        menu.addItem(toggle)
-        let refreshItem = NSMenuItem(title: "立即刷新", action: #selector(refreshAction), keyEquivalent: "")
-        refreshItem.target = self
-        menu.addItem(refreshItem)
-        let keyItem = NSMenuItem(title: "配置 API Key…", action: #selector(openCredentialSetup), keyEquivalent: "")
-        keyItem.target = self
-        menu.addItem(keyItem)
-        menu.addItem(.separator())
-        let cfgItem = NSMenuItem(title: "打开配置文件夹", action: #selector(openConfigDir), keyEquivalent: "")
-        cfgItem.target = self
-        menu.addItem(cfgItem)
-        menu.addItem(.separator())
-        let quit = NSMenuItem(title: "退出", action: #selector(quitApp), keyEquivalent: "")
-        quit.target = self
-        menu.addItem(quit)
-        statusItem.menu = menu
+        guard let button = statusItem.button else { return }
+        if let img = NSImage(systemSymbolName: "bolt.fill",
+                             accessibilityDescription: "GLM Coding Plan 用量") {
+            img.isTemplate = true   // 跟随菜单栏深浅色自动反色
+            button.image = img
+        } else {
+            button.title = "⚡"
+        }
+        button.toolTip = "GLM Coding Plan 用量"
+        button.target = self
+        button.action = #selector(togglePopover)
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])   // 左键弹窗，右键菜单
     }
 
     private func setupHotKey() {
-        HotKeyCenter.shared.onFire = { [weak self] in self?.togglePanel() }
+        HotKeyCenter.shared.onFire = { [weak self] in
+            // 走 performClick 复用左键路径，弹窗锚点与高亮状态保持一致
+            self?.statusItem.button?.performClick(nil)
+        }
         hotkeyOK = HotKeyCenter.shared.register(config.hotkey)
         if !hotkeyOK {
             // 快捷键被别的应用占用时不阻塞使用，菜单栏图标依然可用
@@ -1072,7 +1035,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         refreshTimer?.invalidate()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: config.refreshIntervalMinutes * 60,
                                             repeats: true) { [weak self] _ in
-            guard let self = self, self.panel.isVisible else { return }
+            guard let self = self, self.popover.isShown else { return }
             // 正在填 Key 时不要自动刷新，避免表单被结果渲染冲掉
             guard !self.content.isSetupVisible else { return }
             self.refresh()
@@ -1080,14 +1043,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 每分钟只重画倒计时文案与高峰横幅,不重新请求接口
         countdownTimer?.invalidate()
         countdownTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            guard let self = self, self.panel.isVisible else { return }
+            guard let self = self, self.popover.isShown else { return }
             guard !self.content.isSetupVisible else { return }
             if let d = self.lastData {
                 self.content.render(d, hotkeyText: self.hotkeyText)
             } else {
                 self.content.updatePeakBanner()
             }
-            self.resizeToContent()
+            self.updatePopoverSize()
         }
     }
 
@@ -1095,53 +1058,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hotkeyOK ? HotKeyCenter.display(config.hotkey) : "菜单栏 ⚡"
     }
 
-    // MARK: 窗口位置
+    // MARK: 弹窗行为
 
-    private func restoreFrame() {
-        let size = NSSize(width: HUDMetrics.width, height: HUDMetrics.height)
-        var origin: NSPoint
-        if let x = config.originX, let y = config.originY,
-           isOnAnyScreen(NSRect(origin: NSPoint(x: x, y: y), size: size)) {
-            origin = NSPoint(x: x, y: y)
-        } else if let screen = NSScreen.main {
-            // 默认停在主屏右上角
-            let f = screen.visibleFrame
-            origin = NSPoint(x: f.maxX - size.width - 24, y: f.maxY - size.height - 24)
-        } else {
-            origin = NSPoint(x: 100, y: 100)
+    @objc private func togglePopover() {
+        guard let button = statusItem.button else { return }
+        // 右键弹系统菜单（配置 / 退出），左键切换弹窗
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            statusItem.menu = buildContextMenu()
+            button.performClick(nil)   // 触发一次点击让系统展示原生菜单
+            statusItem.menu = nil
+            return
         }
-        panel.setFrame(NSRect(origin: origin, size: size), display: false)
+        if popover.isShown { popover.performClose(nil); return }
+        if let t = lastAutoClose, Date().timeIntervalSince(t) < 0.2 { return }
+        showPopover()
     }
 
-    private func isOnAnyScreen(_ rect: NSRect) -> Bool {
-        NSScreen.screens.contains { $0.visibleFrame.intersects(rect) }
+    /// 数据入口：弹出即刷新最新用量
+    private func showPopover() {
+        if !content.isSetupVisible { refresh() }
+        presentPopover()
     }
 
-    func windowDidMove(_ notification: Notification) {
-        config.originX = Double(panel.frame.origin.x)
-        config.originY = Double(panel.frame.origin.y)
-        config.save()
+    /// 纯展示入口：不触发请求（配置表单展开时刷新会把表单冲掉）
+    private func presentPopover() {
+        guard let button = statusItem.button else { return }
+        updatePopoverSize()
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        button.highlight(true)
     }
 
-    // MARK: 行为
-
-    @objc private func togglePanel() {
-        // 配置表单展开时不顺带刷新,避免结果渲染把用户正在填的 Key 冲掉(定时器有同样的 guard)
-        if panel.isVisible { hidePanel() } else { showPanel(); if !content.isSetupVisible { refresh() } }
+    func popoverDidClose(_ notification: Notification) {
+        lastAutoClose = Date()
+        statusItem.button?.highlight(false)
     }
 
-    @objc func showPanel() {
-        if !isOnAnyScreen(panel.frame) { restoreFrame() }
-        resizeToContent()
-        panel.orderFrontRegardless()   // 不抢占前台应用焦点
-    }
-
-    @objc private func hidePanel() {
-        panel.orderOut(nil)
+    private func buildContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        let keyItem = NSMenuItem(title: "配置 API Key…", action: #selector(openCredentialSetup),
+                                 keyEquivalent: "")
+        keyItem.target = self
+        menu.addItem(keyItem)
+        let cfgItem = NSMenuItem(title: "打开配置文件夹", action: #selector(openConfigDir),
+                                 keyEquivalent: "")
+        cfgItem.target = self
+        menu.addItem(cfgItem)
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "退出", action: #selector(quitApp), keyEquivalent: "")
+        quit.target = self
+        menu.addItem(quit)
+        return menu
     }
 
     @objc private func refreshAction() {
-        // 同 togglePanel:配置态下点 ↻ 不刷新,表单不被冲掉;保存成功后会自动重查
+        // 配置态下点 ↻ 不刷新,表单不被冲掉;保存成功后会自动重查
         guard !content.isSetupVisible else { return }
         refresh()
     }
@@ -1156,23 +1126,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: 凭据手动配置
 
-    /// 打开面板内配置表单。用户点按钮进来是明确要打字的，激活一次应用
-    /// 保证非激活面板里的输入框能拿到键盘焦点（仅此场景抢一次焦点）。
+    /// 打开面板内配置表单。transient 弹窗展示时即为 key window，输入框可直接拿焦点
     @objc private func openCredentialSetup() {
         let m = ManualCredential.load()
         content.hideSetup()
         content.showSetup(apiKey: m?.key ?? config.apiKey, apiBase: m?.base ?? config.apiBase)
-        showPanel()
-        resizeToContent()
-        NSApp.activate(ignoringOtherApps: false)
-        panel.makeKey()
-        panel.makeFirstResponder(content.setupView.keyField)
+        if !popover.isShown { presentPopover() }
+        updatePopoverSize()
+        popover.contentViewController?.view.window?
+            .makeFirstResponder(content.setupView.keyField)
     }
 
     /// 写入共享的手动凭据文件：悬浮窗、CLI 查询都会用它
     private func saveCredential(key: String, base: String) {
         ManualCredential.save(key: key, base: base)
         content.hideSetup()
+        // 先用上一次的数据立即铺回面板，避免请求期间出现「无额度行」的空档
+        if let d = lastData { content.render(d, hotkeyText: hotkeyText) }
         refresh()
     }
 
@@ -1183,19 +1153,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         config.apiBase = nil
         config.save()
         content.hideSetup()
+        if let d = lastData { content.render(d, hotkeyText: hotkeyText) }
         refresh()
     }
 
     // MARK: 刷新
 
-    private func resizeToContent() {
+    /// 弹窗高度随实际内容行数自适应
+    private func updatePopoverSize() {
         let h = max(content.preferredHeight, 120)
-        guard abs(h - panel.frame.height) > 0.5 else { return }
-        // 保持左上角不动地改变高度，视觉上不跳
-        var f = panel.frame
-        f.origin.y += f.height - h
-        f.size.height = h
-        panel.setFrame(f, display: true)
+        guard abs(h - popover.contentSize.height) > 0.5 else { return }
+        popover.contentSize = NSSize(width: HUDMetrics.width, height: h)
     }
 
     private func refresh() {
@@ -1213,7 +1181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             case .failure(let msg):
                 self.content.renderError(msg, hotkeyText: self.hotkeyText)
             }
-            self.resizeToContent()
+            self.updatePopoverSize()
         }
     }
 }
