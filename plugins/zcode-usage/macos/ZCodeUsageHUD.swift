@@ -587,7 +587,9 @@ final class HUDContentView: NSView {
             y += 4 + 8
         }
 
-        for r in rows {
+        // 只为可见行分配位置：隐藏行若仍推进 y，会把下方内容整体压出面板底部，
+        // 而 preferredHeight 按可见行数计算，两边口径不一致导致底部内容被裁切
+        for r in rows where !r.isHidden {
             r.frame = NSRect(x: pad, y: y, width: w, height: QuotaRowView.rowHeight)
             r.needsLayout = true
             y += QuotaRowView.rowHeight + 8
@@ -800,7 +802,7 @@ final class CredentialSetupView: NSView {
         keyLabel.stringValue = "API Key"
         keyField.placeholderString = "在此粘贴 API Key"
         keyField.font = .systemFont(ofSize: 12)
-        keyField.setFocusRingType(.exterior)
+        keyField.focusRingType = .exterior
 
         saveButton.title = "保存并查询"
         saveButton.bezelStyle = .rounded
@@ -853,7 +855,7 @@ final class CredentialSetupView: NSView {
     @objc private func saveAction() {
         let key = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else {
-            NSApp.beep()
+            NSSound.beep()
             hintLabel.stringValue = "请先粘贴 API Key 再保存"
             return
         }
